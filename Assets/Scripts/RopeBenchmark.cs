@@ -72,6 +72,12 @@ public class RopeBenchmark : MonoBehaviour
     public string csvFileName = "rope_benchmark.csv";
     public bool drawHud = true;
 
+    [Tooltip("Write per-frame constraint violation samples to a separate time-series CSV.")]
+    public bool writeViolationTimeSeries = true;
+
+    [Tooltip("Filename for the per-frame violation time-series CSV.")]
+    public string violationCsvFileName = "rope_benchmark_violation.csv";
+
     private enum BenchState
     {
         InitialWarmup,
@@ -85,6 +91,10 @@ public class RopeBenchmark : MonoBehaviour
     private readonly List<Rope> spawned = new();
     private readonly List<string> csvRows = new();
     private readonly List<float> frameMsSamples = new();
+    private readonly List<string> violationCsvRows = new();
+    private readonly List<float> maxViolationSamples = new();
+    private readonly List<float> meanViolationSamples = new();
+    private readonly List<float> rmsViolationSamples = new();
 
     private float stateStartTime;
     private int consecutiveFailStages;
@@ -95,6 +105,9 @@ public class RopeBenchmark : MonoBehaviour
     private float lastAvgMs;
     private float lastMedianMs;
     private float lastP95Ms;
+    private float lastMaxViolation;
+    private float lastMeanViolation;
+    private float lastRmsViolation;
 
     void Start()
     {
@@ -102,8 +115,15 @@ public class RopeBenchmark : MonoBehaviour
         QualitySettings.vSyncCount = 0;
 
         csvRows.Add(
-            "solver,count,nodeCount,substeps,radialSegments,avgFps,avgMs,medianMs,p95Ms,minMs,maxMs,samples"
+            "solver,count,nodeCount,substeps,radialSegments,avgFps,avgMs,medianMs,p95Ms,minMs,maxMs,samples,maxAbsViolation,meanAbsViolation,rmsViolation"
         );
+
+        if (writeViolationTimeSeries)
+        {
+            violationCsvRows.Add(
+                "solver,count,timeInStage,frameMs,maxAbsViolation,meanAbsViolation,rmsViolation"
+            );
+        }
 
         stateStartTime = Time.unscaledTime;
 
@@ -186,6 +206,9 @@ public class RopeBenchmark : MonoBehaviour
     void BeginMeasuring()
     {
         frameMsSamples.Clear();
+        maxViolationSamples.Clear();
+        meanViolationSamples.Clear();
+        rmsViolationSamples.Clear();
 
         state = BenchState.Measuring;
         stateStartTime = Time.unscaledTime;
@@ -205,9 +228,37 @@ public class RopeBenchmark : MonoBehaviour
         if (dt <= 0f) return;
 
         float frameMs = dt * 1000f;
+        if (frameMs > maxAcceptedFrameMs) return;
 
-        if (frameMs <= maxAcceptedFrameMs)
-            frameMsSamples.Add(frameMs);
+        frameMsSamples.Add(frameMs);
+
+        float maxAbs = 0f;
+        double sumAbs = 0d;
+        double sumSq = 0d;
+        int cnt = 0;
+        for (int i = 0; i < spawned.Count; i++)
+        {
+            spawned[i].AccumulateConstraintViolation(ref maxAbs, ref sumAbs, ref sumSq, ref cnt);
+        }
+
+        float meanAbs = cnt > 0 ? (float)(sumAbs / cnt) : 0f;
+        float rms = cnt > 0 ? Mathf.Sqrt((float)(sumSq / cnt)) : 0f;
+
+        maxViolationSamples.Add(maxAbs);
+        meanViolationSamples.Add(meanAbs);
+        rmsViolationSamples.Add(rms);
+
+        lastMaxViolation = maxAbs;
+        lastMeanViolation = meanAbs;
+        lastRmsViolation = rms;
+
+        if (writeViolationTimeSeries)
+        {
+            float timeInStage = Time.unscaledTime - stateStartTime;
+            violationCsvRows.Add(
+                $"{solverType},{spawned.Count},{timeInStage:F4},{frameMs:F3},{maxAbs:G7},{meanAbs:G7},{rms:G7}"
+            );
+        }
     }
 
     void EndMeasurementWindow()
@@ -216,7 +267,7 @@ public class RopeBenchmark : MonoBehaviour
 
         if (frameMsSamples.Count == 0)
         {
-            csvRows.Add($"{solverType},{count},{nodeCount},{substeps},{ropeRadialSegments},0,0,0,0,0,0,0");
+            csvRows.Add($"{solverType},{count},{nodeCount},{substeps},{ropeRadialSegments},0,0,0,0,0,0,0,0,0,0");
 
             if (logToConsole)
                 Debug.LogWarning($"[Bench {solverType}] No valid samples collected for count={count}.");
@@ -244,6 +295,23 @@ public class RopeBenchmark : MonoBehaviour
         lastMedianMs = medianMs;
         lastP95Ms = p95Ms;
 
+        float peakMaxViolation = 0f;
+        float meanViolation = 0f;
+        float rmsViolation = 0f;
+        if (maxViolationSamples.Count > 0)
+        {
+            double sumMean = 0d;
+            double sumRms = 0d;
+            for (int i = 0; i < maxViolationSamples.Count; i++)
+            {
+                if (maxViolationSamples[i] > peakMaxViolation) peakMaxViolation = maxViolationSamples[i];
+                sumMean += meanViolationSamples[i];
+                sumRms += rmsViolationSamples[i];
+            }
+            meanViolation = (float)(sumMean / maxViolationSamples.Count);
+            rmsViolation = (float)(sumRms / maxViolationSamples.Count);
+        }
+
         csvRows.Add(
             $"{solverType}," +
             $"{count}," +
@@ -256,7 +324,10 @@ public class RopeBenchmark : MonoBehaviour
             $"{p95Ms:F3}," +
             $"{minMs:F3}," +
             $"{maxMs:F3}," +
-            $"{frameMsSamples.Count}"
+            $"{frameMsSamples.Count}," +
+            $"{peakMaxViolation:G7}," +
+            $"{meanViolation:G7}," +
+            $"{rmsViolation:G7}"
         );
 
         if (logToConsole)
@@ -267,7 +338,8 @@ public class RopeBenchmark : MonoBehaviour
                 $"avg={avgMs:F2}ms | " +
                 $"median={medianMs:F2}ms | " +
                 $"p95={p95Ms:F2}ms | " +
-                $"samples={frameMsSamples.Count}"
+                $"samples={frameMsSamples.Count} | " +
+                $"violation peak={peakMaxViolation:G4} mean={meanViolation:G4} rms={rmsViolation:G4}"
             );
         }
 
@@ -339,6 +411,19 @@ public class RopeBenchmark : MonoBehaviour
             File.WriteAllText(fullPath, sb.ToString());
 
             Debug.Log($"Benchmark CSV → {fullPath}");
+        }
+
+        if (writeViolationTimeSeries && !string.IsNullOrEmpty(violationCsvFileName) && violationCsvRows.Count > 1)
+        {
+            string fullPath = Path.Combine("/Users/chasehameetman/Desktop/Rope/Math164Proj/Assets", violationCsvFileName);
+
+            var sb = new StringBuilder();
+            foreach (string row in violationCsvRows)
+                sb.AppendLine(row);
+
+            File.WriteAllText(fullPath, sb.ToString());
+
+            Debug.Log($"Violation time-series CSV → {fullPath}");
         }
 
         Debug.Log($"[Bench {solverType}] DONE — {reason}; total ropes: {spawned.Count}");
@@ -419,19 +504,21 @@ public class RopeBenchmark : MonoBehaviour
             case BenchState.Measuring:
                 text +=
                     $"Measuring: {Mathf.Min(elapsed, measureSeconds):F1} / {measureSeconds:F1}s\n" +
-                    $"Samples: {frameMsSamples.Count}";
+                    $"Samples: {frameMsSamples.Count}\n" +
+                    $"Violation max={lastMaxViolation:G4}  mean={lastMeanViolation:G4}  rms={lastRmsViolation:G4}";
                 break;
 
             case BenchState.Finished:
                 text +=
                     $"Finished: {finishReason}\n" +
                     $"Last avg FPS: {lastAvgFps:F1}\n" +
-                    $"Last avg: {lastAvgMs:F2}ms   median: {lastMedianMs:F2}ms   p95: {lastP95Ms:F2}ms";
+                    $"Last avg: {lastAvgMs:F2}ms   median: {lastMedianMs:F2}ms   p95: {lastP95Ms:F2}ms\n" +
+                    $"Last violation max={lastMaxViolation:G4}  mean={lastMeanViolation:G4}  rms={lastRmsViolation:G4}";
                 break;
         }
 
         text += "\nEsc aborts and flushes CSV.";
 
-        GUI.Box(new Rect(10, 10, 460, 180), text, style);
+        GUI.Box(new Rect(10, 10, 540, 220), text, style);
     }
 }

@@ -476,6 +476,27 @@ public class Rope : MonoBehaviour
         }
     }
 
+    // accumulate the constraint violation statistics for all constraints in the rope, to be used for debugging and tuning solver parameters.
+    public void AccumulateConstraintViolation(
+        ref float maxAbsViolation,
+        ref double sumAbsViolation,
+        ref double sumSqViolation,
+        ref int constraintCount)
+    {
+        if (nodes == null) return;
+        int n = nodes.Length;
+        for (int k = 0; k < n - 1; k++)
+        {
+            float dist = (nodes[k + 1].position - nodes[k].position).magnitude;
+            float violation = dist - segmentLength;
+            float abs = violation < 0f ? -violation : violation;
+            if (abs > maxAbsViolation) maxAbsViolation = abs;
+            sumAbsViolation += abs;
+            sumSqViolation += (double)violation * violation;
+            constraintCount++;
+        }
+    }
+
     void OnDrawGizmosSelected()
     {
         if (nodes == null) return;
