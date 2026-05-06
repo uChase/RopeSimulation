@@ -415,7 +415,7 @@ public class RopeBenchmark : MonoBehaviour
 
         if (writeViolationTimeSeries && !string.IsNullOrEmpty(violationCsvFileName) && violationCsvRows.Count > 1)
         {
-            string fullPath = Path.Combine("/Users/chasehameetman/Desktop/Rope/Math164Proj/Assets", violationCsvFileName);
+            string fullPath = Path.Combine(Application.persistentDataPath, violationCsvFileName);
 
             var sb = new StringBuilder();
             foreach (string row in violationCsvRows)
